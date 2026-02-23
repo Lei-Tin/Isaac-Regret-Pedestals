@@ -1,30 +1,24 @@
--- Update plans:
--- Detect blind items, make option in mod config menu
+-- ORIGINAL SOURCE: https://github.com/seanstertm/Isaac-Regret-Pedestals
+-- Forked version
 
--- SOURCE: https://github.com/seanstertm/Isaac-Regret-Pedestals
+mod = RegisterMod("New Regret Pedestals", 1)
 
-mod = RegisterMod("Regret Pedestals", 1)
 local stopWithHourglass = true
 
-local blindPedestalItemsInRoom = {}
-local blindShopItemsInRoom = {}
--- local visibleItemsInRoom = {}
+local pedestalItemsInRoom = {}    -- {entity=, subtype=, isBlind=}
+local shopItemsInRoom = {}        -- {entity=, subtype=, isBlind=}
 local disappearingPedestalItems = {}
 local disappearingPedestalItemsFrame = {}
 local disappearingShopItems = {}
 local disappearingShopItemsFrame = {}
 
-local questionMarkSprite = Sprite()
-questionMarkSprite:Load("gfx/005.100_collectible.anm2",true)
-questionMarkSprite:ReplaceSpritesheet(1,"gfx/items/collectibles/questionmark.png")
-questionMarkSprite:LoadGraphics()
-questionMarkSprite:SetFrame("Idle", 0)
-
 local itemSprite = Sprite()
 itemSprite:Load("gfx/005.100_collectible.anm2",true)
 
+local game = Game()
+
 function mod:SaveStorage()
-    if Game():GetFrameCount() <= 0 then return end
+    if game:GetFrameCount() <= 0 then return end
     if stopWithHourglass then
         mod:SaveData("true")
     else
@@ -55,114 +49,134 @@ if ModConfigMenu then
 
     ModConfigMenu.AddSetting("Regret Pedestals", "Settings", {
         Type = ModConfigMenu.OptionType.BOOLEAN,
-		Default = true,
-		CurrentSetting = function()
-			return stopWithHourglass
-		end,
-		Display = function()
-			if stopWithHourglass then return "Disable with Glowing Hourglass: true"
-			else return "Disable with Glowing Hourglass: false" end
-		end,
-		OnChange = function(newvalue)
-			stopWithHourglass = newvalue
-			SaveModConfig()
-		end,
-		Info = {"Disable the apparation when holding Glowing Hourglass"}
+        Default = true,
+        CurrentSetting = function()
+            return stopWithHourglass
+        end,
+        Display = function()
+            if stopWithHourglass then return "Disable with Glowing Hourglass: true"
+            else return "Disable with Glowing Hourglass: false" end
+        end,
+        OnChange = function(newvalue)
+            stopWithHourglass = newvalue
+            SaveModConfig()
+        end,
+        Info = {"Disable the apparation when holding Glowing Hourglass"}
     })
 
 end
 
--- POST_PICKUP_UPDATE runs each update the item is in view
+---------------------------------------------------------------
+-- Blind detection (question mark sprite check)
+---------------------------------------------------------------
+
+local questionMarkSprite = Sprite()
+questionMarkSprite:Load("gfx/005.100_collectible.anm2", true)
+questionMarkSprite:ReplaceSpritesheet(1, "gfx/items/collectibles/questionmark.png")
+questionMarkSprite:LoadGraphics()
+
+local function isPedestalBlind(entity)
+    local pedestalSprite = entity:GetSprite()
+    local name = pedestalSprite:GetAnimation()
+
+    if name ~= "Idle" and name ~= "ShopIdle" then
+        return false
+    end
+
+    questionMarkSprite:SetFrame(name, pedestalSprite:GetFrame())
+
+    -- Compare texels along the center column of the sprite
+    for i = -70, 0, 2 do
+        local qcolor = questionMarkSprite:GetTexel(Vector(0, i), Vector(0, 0), 1, 1)
+        local ecolor = pedestalSprite:GetTexel(Vector(0, i), Vector(0, 0), 1, 1)
+
+        if qcolor.Red ~= ecolor.Red or qcolor.Green ~= ecolor.Green or qcolor.Blue ~= ecolor.Blue then
+            return false
+        end
+    end
+
+    -- Check a few extra columns for certainty
+    for j = -3, 3, 2 do
+        for i = -71, 0, 2 do
+            local qcolor = questionMarkSprite:GetTexel(Vector(j, i), Vector(0, 0), 1, 1)
+            local ecolor = pedestalSprite:GetTexel(Vector(j, i), Vector(0, 0), 1, 1)
+
+            if qcolor.Red ~= ecolor.Red or qcolor.Green ~= ecolor.Green or qcolor.Blue ~= ecolor.Blue then
+                return false
+            end
+        end
+    end
+
+    return true
+end
+
+---------------------------------------------------------------
+-- Tracking helpers
+---------------------------------------------------------------
+
+function findTrackedIndex(trackedList, entity)
+    local hash = GetPtrHash(entity)
+    for i, tracked in ipairs(trackedList) do
+        if GetPtrHash(tracked.entity) == hash then
+            return i
+        end
+    end
+    return nil
+end
+
+function isTracked(entity)
+    return findTrackedIndex(pedestalItemsInRoom, entity) ~= nil
+        or findTrackedIndex(shopItemsInRoom, entity) ~= nil
+end
+
+---------------------------------------------------------------
+-- Helper: check if any player is currently touching this pedestal
+---------------------------------------------------------------
+
+local function isPlayerPickingUp(pedestalEntityID)
+    for i = 0, game:GetNumPlayers() - 1 do
+        local player = Isaac.GetPlayer(i)
+
+        if not player:IsItemQueueEmpty() and player.QueuedItem.Item:IsCollectible() and player.QueuedItem.Item.ID == pedestalEntityID then
+            return true
+        end
+    end
+    return false
+end
+
+---------------------------------------------------------------
+-- Callbacks
+---------------------------------------------------------------
+
 function mod:postPickupUpdate(entity)
-    local isQuestionMark = true
     local addToList = true
 
-    -- If item pointer is not saved to memory, add to respective array
-    if not contains(blindPedestalItemsInRoom, entity) and not contains(blindShopItemsInRoom, entity) then
-
-        -- Blind item check, credit to EID // not working and crashes game at the moment
-        -- for j = -1,1,1 do
-        --     for i = -71,0,3 do
-        --         local qcolor = questionMarkSprite:GetTexel(Vector(j,i),nullVector,1,1)
-        --         local ecolor = entitySprite:GetTexel(Vector(j,i),nullVector,1,1)
-        --         if qcolor.Red ~= ecolor.Red or qcolor.Green ~= ecolor.Green or qcolor.Blue ~= ecolor.Blue then
-        --             isQuestionMark = false
-        --         end
-        --     end
-        -- end
-
-        for i=0, Game():GetNumPlayers()-1 do
+    if not isTracked(entity) then
+        for i=0, game:GetNumPlayers()-1 do
             local player = Isaac.GetPlayer(i)
             if player:GetActiveItem() == CollectibleType.COLLECTIBLE_GLOWING_HOUR_GLASS and stopWithHourglass then
                 addToList = false
             end
         end
 
-        if isQuestionMark and addToList then
+        if addToList then
             local entitySprite = entity:GetSprite()
-	        local name = entitySprite:GetAnimation()
+            local name = entitySprite:GetAnimation()
+            local blind = isPedestalBlind(entity)
 
             if name == "Idle" then
-                table.insert(blindPedestalItemsInRoom, entity)
+                table.insert(pedestalItemsInRoom, {entity = entity, subtype = entity.SubType, isBlind = blind})
             end
             if name == "ShopIdle" then
-                table.insert(blindShopItemsInRoom, entity)
+                table.insert(shopItemsInRoom, {entity = entity, subtype = entity.SubType, isBlind = blind})
             end
-        -- else
-        --     Isaac.ConsoleOutput("Visible item")
         end
     end
 end
 
--- Called each update, checks if isaac has deleted any pedestals
-function mod:postUpdate()
-    local pedestalIndicesToRemove = {}
-    local shopIndicesToRemove = {}
-
-    -- Check around Isaac for items, remove ones that were previously in the room
-    local pedestals = Isaac.FindByType(5, 100, -1, true, false)
-    for index, result in ipairs(blindPedestalItemsInRoom) do
-        if not contains(pedestals, result) then
-            table.insert(disappearingPedestalItems, result)
-            table.insert(disappearingPedestalItemsFrame, 0)
-            table.insert(pedestalIndicesToRemove, index)
-        end
-    end
-
-    for index, result in ipairs(blindShopItemsInRoom) do
-        if not contains(pedestals, result) then
-            table.insert(disappearingShopItems, result)
-            table.insert(disappearingShopItemsFrame, 0)
-            table.insert(shopIndicesToRemove, index)
-        end
-    end
-
-    -- Remove removed items from the blind item array
-    for index, result in ipairs(pedestalIndicesToRemove) do
-        table.remove(blindPedestalItemsInRoom, result)
-        for i, r in ipairs(pedestalIndicesToRemove) do
-            if r > result then
-                pedestalIndicesToRemove[i] = r-1
-            end
-        end
-    end
-
-    for index, result in ipairs(shopIndicesToRemove) do
-        table.remove(blindShopItemsInRoom, result)
-        for i, r in ipairs(shopIndicesToRemove) do
-            if r > result then
-                shopIndicesToRemove[i] = r-1
-            end
-        end
-    end
-
-end
-
--- Empty room data on POST_NEW_ROOM
 function mod:postNewRoom()
-    blindPedestalItemsInRoom = {}
-    blindShopItemsInRoom = {}
-    -- visibleItemInRoom = {}
+    pedestalItemsInRoom = {}
+    shopItemsInRoom = {}
     disappearingPedestalItems = {}
     disappearingPedestalItemsFrame = {}
     disappearingShopItems = {}
@@ -170,14 +184,16 @@ function mod:postNewRoom()
 end
 
 function mod:postRender()
-    for index, item in ipairs(disappearingPedestalItems) do
-        if item.SubType ~= 0 then
-            local itemPos = Isaac.WorldToScreen(item.Position)
-            local spriteFile = Isaac.GetItemConfig():GetCollectible(item.SubType).GfxFileName
+    -- Iterate backwards so removal doesn't skip elements
+    for index = #disappearingPedestalItems, 1, -1 do
+        local item = disappearingPedestalItems[index]
+        if item.subtype ~= 0 then
+            local itemPos = Isaac.WorldToScreen(item.position)
+            local spriteFile = Isaac.GetItemConfig():GetCollectible(item.subtype).GfxFileName
 
             itemSprite:ReplaceSpritesheet(1,spriteFile)
             itemSprite:LoadGraphics()
-            local color = Color(1,1,1,(1- (disappearingPedestalItemsFrame[index]/60)))
+            local color = Color(1,1,1,(1-(disappearingPedestalItemsFrame[index]/60)))
             itemSprite.Color = color
             itemSprite:SetFrame("Idle", 0)
 
@@ -187,20 +203,21 @@ function mod:postRender()
 
             disappearingPedestalItemsFrame[index] = disappearingPedestalItemsFrame[index] + 1
 
-            if disappearingPedestalItemsFrame[index] == 60 then
+            if disappearingPedestalItemsFrame[index] >= 60 then
                 table.remove(disappearingPedestalItems, index)
                 table.remove(disappearingPedestalItemsFrame, index)
             end
         end
     end
-    for index, item in ipairs(disappearingShopItems) do
-        if item.SubType ~= 0 then
-            local itemPos = Isaac.WorldToScreen(item.Position)
-            local spriteFile = Isaac.GetItemConfig():GetCollectible(item.SubType).GfxFileName
+    for index = #disappearingShopItems, 1, -1 do
+        local item = disappearingShopItems[index]
+        if item.subtype ~= 0 then
+            local itemPos = Isaac.WorldToScreen(item.position)
+            local spriteFile = Isaac.GetItemConfig():GetCollectible(item.subtype).GfxFileName
 
             itemSprite:ReplaceSpritesheet(1,spriteFile)
             itemSprite:LoadGraphics()
-            local color = Color(1,1,1,(1- (disappearingShopItemsFrame[index]/60)))
+            local color = Color(1,1,1,(1-(disappearingShopItemsFrame[index]/60)))
             itemSprite.Color = color
             itemSprite:SetFrame("ShopIdle", 0)
 
@@ -210,7 +227,7 @@ function mod:postRender()
 
             disappearingShopItemsFrame[index] = disappearingShopItemsFrame[index] + 1
 
-            if disappearingShopItemsFrame[index] == 60 then
+            if disappearingShopItemsFrame[index] >= 60 then
                 table.remove(disappearingShopItems, index)
                 table.remove(disappearingShopItemsFrame, index)
             end
@@ -218,15 +235,62 @@ function mod:postRender()
     end
 end
 
--- Function to check if a table contains a value
-function contains(table, value)
-    for index, result in ipairs(table) do
-        if GetPtrHash(result) == GetPtrHash(value) then
-            return true
+function mod:postUpdate()
+    local pedestals = Isaac.FindByType(5, 100, -1, true, false)
+
+    for index = #pedestalItemsInRoom, 1, -1 do
+        local tracked = pedestalItemsInRoom[index]
+        local stillExists = false
+        local trackedPos = tracked.entity.Position
+        for _, ped in ipairs(pedestals) do
+            if GetPtrHash(ped) == GetPtrHash(tracked.entity) then
+                stillExists = true
+                if ped.SubType ~= tracked.subtype then
+                    if tracked.isBlind and not isPlayerPickingUp(tracked.subtype) then
+                        table.insert(disappearingPedestalItems, {subtype = tracked.subtype, position = Vector(trackedPos.X, trackedPos.Y)})
+                        table.insert(disappearingPedestalItemsFrame, 0)
+                    end
+                    tracked.subtype = ped.SubType
+                    tracked.isBlind = isPedestalBlind(ped)
+                end
+                break
+            end
+        end
+        if not stillExists then
+            if tracked.isBlind and not isPlayerPickingUp(tracked.subtype) then
+                table.insert(disappearingPedestalItems, {subtype = tracked.subtype, position = Vector(trackedPos.X, trackedPos.Y)})
+                table.insert(disappearingPedestalItemsFrame, 0)
+            end
+            table.remove(pedestalItemsInRoom, index)
         end
     end
 
-    return false
+    for index = #shopItemsInRoom, 1, -1 do
+        local tracked = shopItemsInRoom[index]
+        local stillExists = false
+        local trackedPos = tracked.entity.Position
+        for _, ped in ipairs(pedestals) do
+            if GetPtrHash(ped) == GetPtrHash(tracked.entity) then
+                stillExists = true
+                if ped.SubType ~= tracked.subtype then
+                    if tracked.isBlind and not isPlayerPickingUp(tracked.subtype) then
+                        table.insert(disappearingShopItems, {subtype = tracked.subtype, position = Vector(trackedPos.X, trackedPos.Y)})
+                        table.insert(disappearingShopItemsFrame, 0)
+                    end
+                    tracked.subtype = ped.SubType
+                    tracked.isBlind = isPedestalBlind(ped)
+                end
+                break
+            end
+        end
+        if not stillExists then
+            if tracked.isBlind and not isPlayerPickingUp(tracked.subtype) then
+                table.insert(disappearingShopItems, {subtype = tracked.subtype, position = Vector(trackedPos.X, trackedPos.Y)})
+                table.insert(disappearingShopItemsFrame, 0)
+            end
+            table.remove(shopItemsInRoom, index)
+        end
+    end
 end
 
 mod:AddCallback(ModCallbacks.MC_POST_PICKUP_UPDATE, mod.postPickupUpdate, PickupVariant.PICKUP_COLLECTIBLE)

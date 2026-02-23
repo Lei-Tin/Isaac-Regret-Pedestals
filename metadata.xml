@@ -1,11 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <metadata>
-    <name>Regret Pedestals</name>
-    <directory>regret pedestals</directory>
-    <id>2766379837</id>
-    <description></description>
-    <version>1.4</version>
-    <visibility>Private</visibility>
+    <name>New Regret Pedestals</name>
+    <directory>new regret pedestals</directory>
+    <id>3672070284</id>
+    <description>Regret pedestals, but now it shows what blind items you rerolled as well
+
+Forked from the original version: https://github.com/seanstertm/Isaac-Regret-Pedestals</description>
+    <version>1.1</version>
+    <visibility>Public</visibility>
     <tag id="Lua"/>
     <tag id="Tweaks"/>
     <tag id="Graphics"/>
