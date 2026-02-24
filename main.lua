@@ -251,7 +251,6 @@ function mod:postUpdate()
                         table.insert(disappearingPedestalItemsFrame, 0)
                     end
                     tracked.subtype = ped.SubType
-                    tracked.isBlind = isPedestalBlind(ped)
                 end
                 break
             end
@@ -278,7 +277,6 @@ function mod:postUpdate()
                         table.insert(disappearingShopItemsFrame, 0)
                     end
                     tracked.subtype = ped.SubType
-                    tracked.isBlind = isPedestalBlind(ped)
                 end
                 break
             end
