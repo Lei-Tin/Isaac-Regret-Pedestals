@@ -5,15 +5,20 @@ mod = RegisterMod("New Regret Pedestals", 1)
 
 local stopWithHourglass = true
 
-local pedestalItemsInRoom = {}    -- {entity=, subtype=, isBlind=}
-local shopItemsInRoom = {}        -- {entity=, subtype=, isBlind=}
+local prevPedestalData = {}                -- {[pickupIndex] = {subtype, position, isBlind, isShop, itemSet}}
 local disappearingPedestalItems = {}
 local disappearingPedestalItemsFrame = {}
 local disappearingShopItems = {}
 local disappearingShopItemsFrame = {}
+local poofPositions = {}                   -- positions of POOF01 effects this frame
 
 local itemSprite = Sprite()
 itemSprite:Load("gfx/005.100_collectible.anm2",true)
+
+local questionMarkSprite = Sprite()
+questionMarkSprite:Load("gfx/005.100_collectible.anm2", true)
+questionMarkSprite:ReplaceSpritesheet(1, "gfx/items/collectibles/questionmark.png")
+questionMarkSprite:LoadGraphics()
 
 local game = Game()
 
@@ -61,20 +66,17 @@ if ModConfigMenu then
             stopWithHourglass = newvalue
             SaveModConfig()
         end,
-        Info = {"Disable the apparation when holding Glowing Hourglass"}
+        Info = {"Disable the apparition when holding Glowing Hourglass"}
     })
 
 end
 
 ---------------------------------------------------------------
--- Blind detection (question mark sprite check)
+-- Helpers
 ---------------------------------------------------------------
 
-local questionMarkSprite = Sprite()
-questionMarkSprite:Load("gfx/005.100_collectible.anm2", true)
-questionMarkSprite:ReplaceSpritesheet(1, "gfx/items/collectibles/questionmark.png")
-questionMarkSprite:LoadGraphics()
-
+--- Detect if a pedestal is showing the blind (question mark) sprite
+--- by comparing texels against the known question mark graphic.
 local function isPedestalBlind(entity)
     local pedestalSprite = entity:GetSprite()
     local name = pedestalSprite:GetAnimation()
@@ -110,34 +112,40 @@ local function isPedestalBlind(entity)
     return true
 end
 
----------------------------------------------------------------
--- Tracking helpers
----------------------------------------------------------------
-
-function findTrackedIndex(trackedList, entity)
-    local hash = GetPtrHash(entity)
-    for i, tracked in ipairs(trackedList) do
-        if GetPtrHash(tracked.entity) == hash then
-            return i
-        end
+--- Convert an itemSet ({[id]=true, ...}) to a sorted list of IDs.
+local function itemSetToSortedList(itemSet)
+    local list = {}
+    for itemID in pairs(itemSet) do
+        table.insert(list, itemID)
     end
-    return nil
-end
-
-function isTracked(entity)
-    return findTrackedIndex(pedestalItemsInRoom, entity) ~= nil
-        or findTrackedIndex(shopItemsInRoom, entity) ~= nil
+    table.sort(list)
+    return list
 end
 
 ---------------------------------------------------------------
--- Helper: check if any player is currently touching this pedestal
+-- Helper: check if any player is currently picking up this item
 ---------------------------------------------------------------
 
-local function isPlayerPickingUp(pedestalEntityID)
+local function isPlayerPickingUp(collectibleID)
     for i = 0, game:GetNumPlayers() - 1 do
         local player = Isaac.GetPlayer(i)
 
-        if not player:IsItemQueueEmpty() and player.QueuedItem.Item:IsCollectible() and player.QueuedItem.Item.ID == pedestalEntityID then
+        if not player:IsItemQueueEmpty() and player.QueuedItem.Item:IsCollectible() and player.QueuedItem.Item.ID == collectibleID then
+            return true
+        end
+    end
+    return false
+end
+
+---------------------------------------------------------------
+-- Helper: check Glowing Hourglass
+---------------------------------------------------------------
+
+local function isGlowingHourglassActive()
+    if not stopWithHourglass then return false end
+    for i = 0, game:GetNumPlayers() - 1 do
+        local player = Isaac.GetPlayer(i)
+        if player:GetActiveItem() == CollectibleType.COLLECTIBLE_GLOWING_HOUR_GLASS then
             return true
         end
     end
@@ -148,150 +156,220 @@ end
 -- Callbacks
 ---------------------------------------------------------------
 
-function mod:postPickupUpdate(entity)
-    local addToList = true
-
-    if not isTracked(entity) then
-        for i=0, game:GetNumPlayers()-1 do
-            local player = Isaac.GetPlayer(i)
-            if player:GetActiveItem() == CollectibleType.COLLECTIBLE_GLOWING_HOUR_GLASS and stopWithHourglass then
-                addToList = false
-            end
-        end
-
-        if addToList then
-            local entitySprite = entity:GetSprite()
-            local name = entitySprite:GetAnimation()
-            local blind = isPedestalBlind(entity)
-
-            if name == "Idle" then
-                table.insert(pedestalItemsInRoom, {entity = entity, subtype = entity.SubType, isBlind = blind})
-            end
-            if name == "ShopIdle" then
-                table.insert(shopItemsInRoom, {entity = entity, subtype = entity.SubType, isBlind = blind})
-            end
-        end
-    end
-end
-
 function mod:postNewRoom()
-    pedestalItemsInRoom = {}
-    shopItemsInRoom = {}
+    prevPedestalData = {}
     disappearingPedestalItems = {}
     disappearingPedestalItemsFrame = {}
     disappearingShopItems = {}
     disappearingShopItemsFrame = {}
+    poofPositions = {}
+end
+
+local ITEM_SPACING = 20  -- pixels between each item in a multi-item ghost
+
+local function renderDisappearingList(list, frameList, animName)
+    for index = #list, 1, -1 do
+        local item = list[index]
+        local subtypes = item.subtypes
+        if #subtypes > 0 then
+            local basePos = Isaac.WorldToScreen(item.position)
+            local frame = frameList[index]
+            local alpha = 1 - (frame / 60)
+            local color = Color(1, 1, 1, alpha)
+            local yOffset = -frame / 10
+
+            -- Center the group around the pedestal position
+            local totalWidth = (#subtypes - 1) * ITEM_SPACING
+            local startX = basePos.X - totalWidth / 2
+
+            for i, subtype in ipairs(subtypes) do
+                if subtype ~= 0 then
+                    local cfg = Isaac.GetItemConfig():GetCollectible(subtype)
+                    if cfg then
+                        itemSprite:ReplaceSpritesheet(1, cfg.GfxFileName)
+                        itemSprite:LoadGraphics()
+                        itemSprite.Color = color
+                        itemSprite:SetFrame(animName, 0)
+
+                        local drawPos = Vector(startX + (i - 1) * ITEM_SPACING, basePos.Y + yOffset)
+                        itemSprite:Render(drawPos, Vector(0, 0), Vector(0, 0))
+                    end
+                end
+            end
+
+            frameList[index] = frame + 1
+            if frameList[index] >= 60 then
+                table.remove(list, index)
+                table.remove(frameList, index)
+            end
+        end
+    end
 end
 
 function mod:postRender()
-    -- Iterate backwards so removal doesn't skip elements
-    for index = #disappearingPedestalItems, 1, -1 do
-        local item = disappearingPedestalItems[index]
-        if item.subtype ~= 0 then
-            local itemPos = Isaac.WorldToScreen(item.position)
-            local spriteFile = Isaac.GetItemConfig():GetCollectible(item.subtype).GfxFileName
+    renderDisappearingList(disappearingPedestalItems, disappearingPedestalItemsFrame, "Idle")
+    renderDisappearingList(disappearingShopItems, disappearingShopItemsFrame, "ShopIdle")
+end
 
-            itemSprite:ReplaceSpritesheet(1,spriteFile)
-            itemSprite:LoadGraphics()
-            local color = Color(1,1,1,(1-(disappearingPedestalItemsFrame[index]/60)))
-            itemSprite.Color = color
-            itemSprite:SetFrame("Idle", 0)
-
-            itemPos.Y = itemPos.Y - disappearingPedestalItemsFrame[index]/10
-
-            itemSprite:Render(itemPos, Vector(0,0), Vector(0,0))
-
-            disappearingPedestalItemsFrame[index] = disappearingPedestalItemsFrame[index] + 1
-
-            if disappearingPedestalItemsFrame[index] >= 60 then
-                table.remove(disappearingPedestalItems, index)
-                table.remove(disappearingPedestalItemsFrame, index)
-            end
+---------------------------------------------------------------
+-- Poof detection helper
+---------------------------------------------------------------
+local function hasPoofAtPosition(pos)
+    for _, poofPos in ipairs(poofPositions) do
+        if pos:Distance(poofPos) < 1.0 then
+            return true
         end
     end
-    for index = #disappearingShopItems, 1, -1 do
-        local item = disappearingShopItems[index]
-        if item.subtype ~= 0 then
-            local itemPos = Isaac.WorldToScreen(item.position)
-            local spriteFile = Isaac.GetItemConfig():GetCollectible(item.subtype).GfxFileName
+    return false
+end
 
-            itemSprite:ReplaceSpritesheet(1,spriteFile)
-            itemSprite:LoadGraphics()
-            local color = Color(1,1,1,(1-(disappearingShopItemsFrame[index]/60)))
-            itemSprite.Color = color
-            itemSprite:SetFrame("ShopIdle", 0)
-
-            itemPos.Y = itemPos.Y - disappearingShopItemsFrame[index]/10
-
-            itemSprite:Render(itemPos, Vector(0,0), Vector(0,0))
-
-            disappearingShopItemsFrame[index] = disappearingShopItemsFrame[index] + 1
-
-            if disappearingShopItemsFrame[index] >= 60 then
-                table.remove(disappearingShopItems, index)
-                table.remove(disappearingShopItemsFrame, index)
-            end
-        end
-    end
+function mod:postPoofInit(effect)
+    table.insert(poofPositions, Vector(effect.Position.X, effect.Position.Y))
 end
 
 function mod:postUpdate()
+    if isGlowingHourglassActive() then
+        prevPedestalData = {}
+        poofPositions = {}
+        return
+    end
+
+    -- Build Index -> entity lookup from actual room entities
     local pedestals = Isaac.FindByType(5, 100, -1, true, false)
-
-    for index = #pedestalItemsInRoom, 1, -1 do
-        local tracked = pedestalItemsInRoom[index]
-        local stillExists = false
-        local trackedPos = tracked.entity.Position
-        for _, ped in ipairs(pedestals) do
-            if GetPtrHash(ped) == GetPtrHash(tracked.entity) then
-                stillExists = true
-                if ped.SubType ~= tracked.subtype then
-                    if tracked.isBlind and not isPlayerPickingUp(tracked.subtype) then
-                        table.insert(disappearingPedestalItems, {subtype = tracked.subtype, position = Vector(trackedPos.X, trackedPos.Y)})
-                        table.insert(disappearingPedestalItemsFrame, 0)
-                    end
-                    tracked.subtype = ped.SubType
-                end
-                break
-            end
-        end
-        if not stillExists then
-            if tracked.isBlind and not isPlayerPickingUp(tracked.subtype) then
-                table.insert(disappearingPedestalItems, {subtype = tracked.subtype, position = Vector(trackedPos.X, trackedPos.Y)})
-                table.insert(disappearingPedestalItemsFrame, 0)
-            end
-            table.remove(pedestalItemsInRoom, index)
+    local currentEntities = {}  -- pickupIndex -> entity
+    for _, ped in ipairs(pedestals) do
+        if ped.SubType ~= 0 then
+            currentEntities[ped.Index] = ped
         end
     end
 
-    for index = #shopItemsInRoom, 1, -1 do
-        local tracked = shopItemsInRoom[index]
-        local stillExists = false
-        local trackedPos = tracked.entity.Position
-        for _, ped in ipairs(pedestals) do
-            if GetPtrHash(ped) == GetPtrHash(tracked.entity) then
-                stillExists = true
-                if ped.SubType ~= tracked.subtype then
-                    if tracked.isBlind and not isPlayerPickingUp(tracked.subtype) then
-                        table.insert(disappearingShopItems, {subtype = tracked.subtype, position = Vector(trackedPos.X, trackedPos.Y)})
-                        table.insert(disappearingShopItemsFrame, 0)
+    -- Check if all previous items are still there
+    for pickupIndex, prev in pairs(prevPedestalData) do
+        local ped = currentEntities[pickupIndex]
+
+        if not ped then
+            local count = 0
+            for _ in pairs(prev.itemSet) do count = count + 1 end
+            local isCycling = count > 1
+
+            if isCycling and isPlayerPickingUp(prev.subtype) then
+                -- Player picked up from a cycling pedestal: show the other options
+                local others = {}
+                for itemID in pairs(prev.itemSet) do
+                    if itemID ~= prev.subtype then
+                        table.insert(others, itemID)
                     end
-                    tracked.subtype = ped.SubType
                 end
-                break
+                table.sort(others)
+                if #others > 0 then
+                    local list = prev.isShop and disappearingShopItems or disappearingPedestalItems
+                    local frameList = prev.isShop and disappearingShopItemsFrame or disappearingPedestalItemsFrame
+                    table.insert(list, {subtypes = others, position = Vector(prev.position.X, prev.position.Y)})
+                    table.insert(frameList, 0)
+                end
+            elseif prev.isBlind and not isPlayerPickingUp(prev.subtype) then
+                -- Blind pedestal disappeared (reroll / despawn)
+                local list = prev.isShop and disappearingShopItems or disappearingPedestalItems
+                local frameList = prev.isShop and disappearingShopItemsFrame or disappearingPedestalItemsFrame
+                table.insert(list, {subtypes = itemSetToSortedList(prev.itemSet), position = Vector(prev.position.X, prev.position.Y)})
+                table.insert(frameList, 0)
             end
-        end
-        if not stillExists then
-            if tracked.isBlind and not isPlayerPickingUp(tracked.subtype) then
-                table.insert(disappearingShopItems, {subtype = tracked.subtype, position = Vector(trackedPos.X, trackedPos.Y)})
-                table.insert(disappearingShopItemsFrame, 0)
+        else
+            -- Item is still there but became different
+            if ped.SubType ~= prev.subtype then
+                local count = 0
+                for _ in pairs(prev.itemSet) do count = count + 1 end
+                local isCycling = count > 1
+
+                if hasPoofAtPosition(ped.Position) and prev.isBlind and not isPlayerPickingUp(prev.subtype) then
+                    -- Poof + blind + not picking up = reroll: show what was there
+                    local isShop = ped:GetSprite():GetAnimation() == "ShopIdle" or prev.isShop
+                    local list = isShop and disappearingShopItems or disappearingPedestalItems
+                    local frameList = isShop and disappearingShopItemsFrame or disappearingPedestalItemsFrame
+                    table.insert(list, {subtypes = itemSetToSortedList(prev.itemSet), position = Vector(ped.Position.X, ped.Position.Y)})
+                    table.insert(frameList, 0)
+                elseif not hasPoofAtPosition(ped.Position) and isPlayerPickingUp(prev.subtype) then
+                    -- No poof + picking up = Tainted Isaac swap: show other cycle options or blind item
+                    if isCycling and prev.isBlind then
+                        local others = {}
+                        for itemID in pairs(prev.itemSet) do
+                            if itemID ~= prev.subtype then
+                                table.insert(others, itemID)
+                            end
+                        end
+                        table.sort(others)
+                        if #others > 0 then
+                            local isShop = ped:GetSprite():GetAnimation() == "ShopIdle" or prev.isShop
+                            local list = isShop and disappearingShopItems or disappearingPedestalItems
+                            local frameList = isShop and disappearingShopItemsFrame or disappearingPedestalItemsFrame
+                            table.insert(list, {subtypes = others, position = Vector(ped.Position.X, ped.Position.Y)})
+                            table.insert(frameList, 0)
+                        end
+                    elseif prev.isBlind then
+                        local isShop = ped:GetSprite():GetAnimation() == "ShopIdle" or prev.isShop
+                        local list = isShop and disappearingShopItems or disappearingPedestalItems
+                        local frameList = isShop and disappearingShopItemsFrame or disappearingPedestalItemsFrame
+                        table.insert(list, {subtypes = {prev.subtype}, position = Vector(ped.Position.X, ped.Position.Y)})
+                        table.insert(frameList, 0)
+                    end
+                end
             end
-            table.remove(shopItemsInRoom, index)
         end
     end
+
+    -- Snapshot current state for the next frame
+    local newPrevData = {}
+    for idx, ped in pairs(currentEntities) do
+        local prev = prevPedestalData[idx]
+
+        -- Blind: carry forward from cache; only run the expensive texel check
+        -- on first encounter or after a reroll. Clear when player touches it.
+        local isBlind
+        if prev then
+            if isPlayerPickingUp(prev.subtype) then
+                isBlind = false
+            else
+                isBlind = prev.isBlind
+            end
+        else
+            isBlind = isPedestalBlind(ped)
+        end
+
+        -- Track cycling items: accumulate on cycle, reset on reroll
+        local itemSet = {}
+        local rerolledThisFrame = hasPoofAtPosition(ped.Position)
+
+        -- If no poof, it means we are just cycling
+        if rerolledThisFrame then
+            -- Reroll wipes the cycle history; start fresh with the new item
+            itemSet[ped.SubType] = true
+        else
+            -- Carry forward previously observed items (cycling accumulates)
+            if prev then
+                for itemID in pairs(prev.itemSet) do
+                    itemSet[itemID] = true
+                end
+            end
+            itemSet[ped.SubType] = true
+        end
+
+        newPrevData[idx] = {
+            subtype  = ped.SubType,
+            position = Vector(ped.Position.X, ped.Position.Y),
+            isBlind  = isBlind,
+            isShop   = (ped:GetSprite():GetAnimation() == "ShopIdle") or (prev and prev.isShop) or false,
+            itemSet  = itemSet,
+        }
+    end
+    prevPedestalData = newPrevData
+
+    -- Clear poof positions at end of frame
+    poofPositions = {}
 end
 
-mod:AddCallback(ModCallbacks.MC_POST_PICKUP_UPDATE, mod.postPickupUpdate, PickupVariant.PICKUP_COLLECTIBLE)
+-- POOF01 is the reroll effect
+mod:AddCallback(ModCallbacks.MC_POST_EFFECT_INIT, mod.postPoofInit, EffectVariant.POOF01)
+
 mod:AddCallback(ModCallbacks.MC_POST_NEW_ROOM, mod.postNewRoom)
 mod:AddCallback(ModCallbacks.MC_POST_UPDATE, mod.postUpdate)
 mod:AddCallback(ModCallbacks.MC_POST_RENDER, mod.postRender)
